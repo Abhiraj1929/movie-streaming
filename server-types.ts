@@ -1,9 +1,11 @@
 export interface Participant {
-  id: string;
+  id: string;           // socket.id — changes on reconnect
+  userId: string;       // persistent UUID — never changes
   displayName: string;
   isHost: boolean;
   isMuted: boolean;
   hasVideo: boolean;
+  disconnected: boolean;
   joinedAt: Date;
 }
 

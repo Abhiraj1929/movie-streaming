@@ -1,7 +1,7 @@
 'use client';
 
 import { Participant } from '@/types';
-import { Users, Crown, Mic, MicOff } from 'lucide-react';
+import { Users, Crown, Mic, MicOff, WifiOff } from 'lucide-react';
 
 interface ParticipantListProps {
   participants: Participant[];
@@ -18,10 +18,10 @@ export function ParticipantList({ participants, currentUserId }: ParticipantList
       <div className="space-y-2">
         {participants.map((p) => (
           <div
-            key={p.id}
+            key={p.userId}
             className={`flex items-center gap-3 p-2 rounded-lg transition-colors ${
               p.id === currentUserId ? 'bg-cinema-700' : 'bg-cinema-800'
-            }`}
+            } ${p.disconnected ? 'opacity-60' : ''}`}
           >
             <div className="relative">
               <div className="w-8 h-8 rounded-full bg-gradient-to-br from-neon-blue to-neon-purple flex items-center justify-center text-white text-sm font-medium">
@@ -29,6 +29,11 @@ export function ParticipantList({ participants, currentUserId }: ParticipantList
               </div>
               {p.isHost && (
                 <Crown className="absolute -top-1 -right-1 w-4 h-4 text-yellow-500" />
+              )}
+              {p.disconnected && (
+                <div className="absolute -bottom-1 -right-1 w-4 h-4 bg-yellow-500 rounded-full flex items-center justify-center">
+                  <WifiOff className="w-2.5 h-2.5 text-white" />
+                </div>
               )}
             </div>
             <div className="flex-1 min-w-0">
@@ -39,7 +44,14 @@ export function ParticipantList({ participants, currentUserId }: ParticipantList
                 )}
               </p>
               <p className="text-xs text-gray-500">
-                {p.isHost ? 'Host' : 'Viewer'}
+                {p.disconnected ? (
+                  <span className="text-yellow-400 flex items-center gap-1">
+                    <WifiOff className="w-3 h-3" />
+                    Reconnecting...
+                  </span>
+                ) : (
+                  p.isHost ? 'Host' : 'Viewer'
+                )}
               </p>
             </div>
             {p.isMuted ? (

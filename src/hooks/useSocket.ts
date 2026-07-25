@@ -61,6 +61,21 @@ function clearRoomStorage() {
   } catch {}
 }
 
+/** Generate a persistent userId on first visit, store in sessionStorage. */
+function getOrCreateUserId(): string {
+  if (typeof window === 'undefined') return '';
+  try {
+    let uid = sessionStorage.getItem('wp_userId');
+    if (!uid) {
+      uid = crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+      sessionStorage.setItem('wp_userId', uid);
+    }
+    return uid;
+  } catch {
+    return `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+  }
+}
+
 export function useSocket() {
   const [isConnected, setIsConnected] = useState(false);
   const saved = loadRoomFromStorage();
@@ -77,6 +92,8 @@ export function useSocket() {
   _setError = setError;
   _setIsConnected = setIsConnected;
 
+  const userId = typeof window !== 'undefined' ? getOrCreateUserId() : '';
+
   useEffect(() => {
     if (socket) return;
 
@@ -90,28 +107,29 @@ export function useSocket() {
       socket = io(url, { transports: ['polling', 'websocket'], upgrade: true });
 
       socket.on('connect', () => {
-        console.log('[SOCKET] Connected:', socket.id);
+        console.log('[SOCKET] Connected:', socket.id, 'userId:', userId);
         _setIsConnected(true);
         _setError(null);
         const saved = loadRoomFromStorage();
         if (saved) {
-          socket.emit('join-room', { roomId: saved.room.id, displayName: saved.participant.displayName });
+          // Reconnect: rejoin the room with persistent userId so server can restore us
+          socket.emit('join-room', {
+            roomId: saved.room.id,
+            displayName: saved.participant.displayName,
+            userId,
+          });
         }
       });
 
       socket.on('disconnect', () => _setIsConnected(false));
 
       socket.on('room-created', (data: any) => {
-        console.log('[SOCKET] room-created:', data.roomId);
-        const r: Room = {
-          id: data.roomId, hostId: socket.id, participants: [data.participant],
-          videoState: { isPlaying: false, currentTime: 0, duration: 0, videoSrc: '', lastUpdate: Date.now() },
-          createdAt: new Date(),
-        };
+        console.log('[SOCKET] room-created:', data.room.id);
+        const r: Room = data.room;
         _setRoom(r);
         _setParticipant(data.participant);
-        _setParticipants([data.participant]);
-        setCachedRoomData(r, data.participant, [data.participant]);
+        _setParticipants(data.participants);
+        setCachedRoomData(r, data.participant, data.participants);
       });
 
       socket.on('room-joined', (data: any) => {
@@ -127,24 +145,24 @@ export function useSocket() {
 
       socket.on('participant-joined', (p: Participant) => {
         _setParticipants((prev: Participant[]) => {
-          if (prev.find(pp => pp.id === p.id)) return prev;
+          if (prev.find(pp => pp.userId === p.userId)) return prev;
           const next = [...prev, p];
           _setRoom((r: any) => r ? { ...r, participants: next } : r);
           return next;
         });
       });
 
-      socket.on('participant-left', (id: string) => {
+      socket.on('participant-left', (userIdLeft: string) => {
         _setParticipants((prev: Participant[]) => {
-          const next = prev.filter(p => p.id !== id);
+          const next = prev.filter(p => p.userId !== userIdLeft);
           _setRoom((r: any) => r ? { ...r, participants: next } : r);
           return next;
         });
       });
 
       socket.on('participant-updated', (p: Participant) => {
-        _setParticipants((prev: Participant[]) => prev.map(pp => pp.id === p.id ? p : pp));
-        _setParticipant((prev: any) => prev?.id === p.id ? p : prev);
+        _setParticipants((prev: Participant[]) => prev.map(pp => pp.userId === p.userId ? p : pp));
+        _setParticipant((prev: any) => prev?.userId === p.userId ? p : prev);
       });
 
       socket.on('video-state-updated', (state: VideoState) => {
@@ -160,17 +178,17 @@ export function useSocket() {
     })();
 
     return () => { importCancelled = true; };
-  }, []);
+  }, [userId]);
 
   const createRoom = useCallback((displayName: string) => {
     if (!socket?.connected) { _setError('Not connected yet, please wait...'); return; }
-    socket.emit('create-room', { displayName });
-  }, []);
+    socket.emit('create-room', { userId, displayName });
+  }, [userId]);
 
   const joinRoom = useCallback((roomId: string, displayName: string) => {
     if (!socket?.connected) { _setError('Not connected'); return; }
-    socket.emit('join-room', { roomId, displayName });
-  }, []);
+    socket.emit('join-room', { roomId, displayName, userId });
+  }, [userId]);
 
   const leaveRoom = useCallback(() => {
     socket?.emit('leave-room');

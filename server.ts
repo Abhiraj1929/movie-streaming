@@ -14,8 +14,13 @@ const app = next({ dev, hostname, port });
 const handle = app.getRequestHandler();
 
 const rooms = new Map<string, Room>();
-const socketToRoom = new Map<string, string>();
-const socketToParticipant = new Map<string, Participant>();
+const socketToRoom = new Map<string, string>();             // socketId -> roomId
+const socketToUserId = new Map<string, string>();            // socketId -> persistent userId
+const userIdToData = new Map<string, {                      // userId -> user record
+  roomId: string;
+  participant: Participant;
+  graceTimer?: NodeJS.Timeout;
+}>();
 
 const MAX_ROOMS = 100;
 const MAX_MESSAGE_LENGTH = 500;
@@ -24,6 +29,7 @@ const ROOM_EMPTY_TTL_MS = 5 * 60 * 1000;
 const ROOM_MAX_AGE_MS = 4 * 60 * 60 * 1000;
 const RATE_LIMIT_WINDOW_MS = 10000;
 const RATE_LIMIT_MAX = 30;
+const RECONNECT_GRACE_MS = 120_000;                         // 2-minute grace period
 
 const rateLimitMap = new Map<string, { count: number; resetAt: number }>();
 
@@ -48,45 +54,91 @@ function generateRoomId(): string {
 }
 
 function sanitizeInput(input: string, maxLength: number): string {
+  if (typeof input !== 'string') return '';
   return input.replace(/[<>"&]/g, '').trim().substring(0, maxLength);
 }
 
-function handleLeaveRoom(socketId: string, io: SocketIOServer): void {
-  const roomId = socketToRoom.get(socketId);
-  const participant = socketToParticipant.get(socketId);
-  if (!roomId || !participant) return;
+function findParticipantInRoom(room: Room, userId: string): Participant | undefined {
+  return room.participants.find((p) => p.userId === userId);
+}
 
+/** Clean up all server-side state for a user (leave + cancel timer). */
+function removeUserFromServer(userId: string, io?: SocketIOServer): void {
+  const record = userIdToData.get(userId);
+  if (!record) return;
+
+  if (record.graceTimer) {
+    clearTimeout(record.graceTimer);
+    record.graceTimer = undefined;
+  }
+
+  // Clean socket-level maps for any socket.id this user may have held
+  // We scan socketToUserId (max 6 users per room, so cheap)
+  for (const [sid, uid] of socketToUserId) {
+    if (uid === userId) {
+      socketToRoom.delete(sid);
+      socketToUserId.delete(sid);
+      rateLimitMap.delete(sid);
+      if (io) {
+        const sock = io.sockets.sockets.get(sid);
+        if (sock) {
+          sock.leave(record.roomId);
+        }
+      }
+    }
+  }
+
+  userIdToData.delete(userId);
+}
+
+/** Remove a participant from a room, handling host transfer and room cleanup. */
+function removeParticipantFromRoom(roomId: string, userId: string, io: SocketIOServer, notify = true): void {
   const room = rooms.get(roomId);
   if (!room) return;
 
-  room.participants = room.participants.filter((p) => p.id !== socketId);
+  const record = userIdToData.get(userId);
+  const leftParticipant = record?.participant || findParticipantInRoom(room, userId);
+  if (!leftParticipant) return;
 
-  const systemMessage: ChatMessage = {
-    id: uuidv4(),
-    senderId: 'system',
-    senderName: 'System',
-    content: `${participant.displayName} left the party`,
-    timestamp: new Date(),
-    type: 'system',
-  };
-  io.to(roomId).emit('chat-message-received', systemMessage);
+  const displayName = leftParticipant.displayName;
+  const wasHost = leftParticipant.isHost;
 
-  if (participant.isHost && room.participants.length > 0) {
+  // Remove from room's participant list
+  room.participants = room.participants.filter((p) => p.userId !== userId);
+
+  // System message
+  if (notify) {
+    const systemMessage: ChatMessage = {
+      id: uuidv4(),
+      senderId: 'system',
+      senderName: 'System',
+      content: `${displayName} left the party`,
+      timestamp: new Date(),
+      type: 'system',
+    };
+    io.to(roomId).emit('chat-message-received', systemMessage);
+  }
+
+  // Host transfer: assign host to the oldest remaining participant
+  if (wasHost && room.participants.length > 0) {
     const newHost = room.participants[0];
     newHost.isHost = true;
     room.hostId = newHost.id;
-    io.to(newHost.id).emit('participant-updated', newHost);
+    io.to(roomId).emit('participant-updated', newHost);
   }
 
-  io.to(roomId).emit('participant-left', socketId);
+  // Notify remaining participants (send userId, not socket.id, for matching)
+  if (notify) {
+    io.to(roomId).emit('participant-left', userId);
+  }
 
+  // Schedule room cleanup if empty
   if (room.participants.length === 0) {
     room.emptySince = Date.now();
   }
 
-  socketToRoom.delete(socketId);
-  socketToParticipant.delete(socketId);
-  rateLimitMap.delete(socketId);
+  // Remove server-side user state
+  removeUserFromServer(userId, io);
 }
 
 function cleanupRooms() {
@@ -94,6 +146,10 @@ function cleanupRooms() {
   for (const [roomId, room] of rooms) {
     if (room.participants.length === 0) {
       if (room.emptySince && now - room.emptySince > ROOM_EMPTY_TTL_MS) {
+        // Clean up any lingering userId entries for this room
+        for (const [uid, data] of userIdToData) {
+          if (data.roomId === roomId) removeUserFromServer(uid);
+        }
         rooms.delete(roomId);
       }
     } else if (now - new Date(room.createdAt).getTime() > ROOM_MAX_AGE_MS) {
@@ -101,9 +157,7 @@ function cleanupRooms() {
       if (io) {
         io.to(roomId).emit('room-error', { message: 'Room expired after 4 hours' });
         for (const p of room.participants) {
-          io.sockets.sockets.get(p.id)?.leave(roomId);
-          socketToRoom.delete(p.id);
-          socketToParticipant.delete(p.id);
+          removeUserFromServer(p.userId, io);
         }
       }
       rooms.delete(roomId);
@@ -146,8 +200,15 @@ app.prepare().then(() => {
   io.on('connection', (socket) => {
     console.log(`Client connected: ${socket.id}`);
 
-    socket.on('create-room', ({ displayName }) => {
+    /* ------------------------------------------------------------------ */
+    /*  CREATE ROOM                                                        */
+    /* ------------------------------------------------------------------ */
+    socket.on('create-room', ({ roomId: customRoomId, userId, displayName }) => {
       if (isRateLimited(socket.id)) return;
+
+      if (!userId || typeof userId !== 'string') {
+        return socket.emit('room-error', { message: 'User ID is required' });
+      }
       if (!displayName || typeof displayName !== 'string') {
         return socket.emit('room-error', { message: 'Display name is required' });
       }
@@ -156,13 +217,29 @@ app.prepare().then(() => {
         return socket.emit('room-error', { message: 'Invalid display name' });
       }
 
-      const roomId = generateRoomId();
+      // Determine room ID: use custom if provided and valid, else auto-generate
+      let roomId: string;
+      if (customRoomId && typeof customRoomId === 'string') {
+        const sanitizedRoomId = sanitizeInput(customRoomId.toUpperCase(), 10);
+        if (!sanitizedRoomId || sanitizedRoomId.length < 2) {
+          return socket.emit('room-error', { message: 'Room name must be at least 2 characters' });
+        }
+        if (rooms.has(sanitizedRoomId)) {
+          return socket.emit('room-error', { message: 'Room name already exists. Please choose another.' });
+        }
+        roomId = sanitizedRoomId;
+      } else {
+        roomId = generateRoomId();
+      }
+
       const participant: Participant = {
         id: socket.id,
+        userId,
         displayName: sanitizedName,
         isHost: true,
         isMuted: false,
         hasVideo: true,
+        disconnected: false,
         joinedAt: new Date(),
       };
 
@@ -182,19 +259,31 @@ app.prepare().then(() => {
 
       rooms.set(roomId, room);
       socketToRoom.set(socket.id, roomId);
-      socketToParticipant.set(socket.id, participant);
+      socketToUserId.set(socket.id, userId);
+      userIdToData.set(userId, { roomId, participant });
 
       socket.join(roomId);
-      console.log(`Room ${roomId} created by ${sanitizedName}`);
-      socket.emit('room-created', { roomId, participant });
+      console.log(`Room ${roomId} created by ${sanitizedName} (userId: ${userId})`);
+      socket.emit('room-created', {
+        room: { ...room },
+        participant,
+        participants: room.participants,
+      });
     });
 
-    socket.on('join-room', ({ roomId, displayName }) => {
+    /* ------------------------------------------------------------------ */
+    /*  JOIN ROOM (also handles reconnection during grace period)          */
+    /* ------------------------------------------------------------------ */
+    socket.on('join-room', ({ roomId, displayName, userId }) => {
       if (isRateLimited(socket.id)) return;
+
       if (!roomId || typeof roomId !== 'string' || !displayName || typeof displayName !== 'string') {
         return socket.emit('room-error', { message: 'Room ID and display name are required' });
       }
-      const normalizedRoomId = sanitizeInput(roomId.toUpperCase(), 6);
+      if (!userId || typeof userId !== 'string') {
+        return socket.emit('room-error', { message: 'User ID is required' });
+      }
+      const normalizedRoomId = sanitizeInput(roomId.toUpperCase(), 10);
       const sanitizedName = sanitizeInput(displayName, MAX_DISPLAY_NAME_LENGTH);
       if (!sanitizedName) {
         return socket.emit('room-error', { message: 'Invalid display name' });
@@ -204,22 +293,85 @@ app.prepare().then(() => {
       if (!room) {
         return socket.emit('room-error', { message: 'Room not found' });
       }
+
+      // Check if this userId already exists in this room (reconnection during grace period)
+      const existingRecord = userIdToData.get(userId);
+      const existingInRoom = existingRecord && existingRecord.roomId === normalizedRoomId;
+
+      if (existingInRoom) {
+        // --- RECONNECTION PATH ---
+        console.log(`[GRACE] ${sanitizedName} (${userId}) reconnecting to room ${normalizedRoomId}`);
+
+        // Cancel the grace timer
+        if (existingRecord.graceTimer) {
+          clearTimeout(existingRecord.graceTimer);
+          existingRecord.graceTimer = undefined;
+        }
+
+        // Clean up old socket mappings
+        for (const [sid, uid] of socketToUserId) {
+          if (uid === userId) {
+            const oldSock = io.sockets.sockets.get(sid);
+            if (oldSock) oldSock.leave(normalizedRoomId);
+            socketToRoom.delete(sid);
+            socketToUserId.delete(sid);
+            rateLimitMap.delete(sid);
+          }
+        }
+
+        // Update participant's socket.id to the new socket
+        const participant = existingRecord.participant;
+        participant.id = socket.id;
+        participant.disconnected = false;
+
+        // Update room participant list in-place (same object reference)
+        room.participants = room.participants.map((p) =>
+          p.userId === userId ? participant : p
+        );
+
+        // Update maps
+        socketToRoom.set(socket.id, normalizedRoomId);
+        socketToUserId.set(socket.id, userId);
+
+        socket.join(normalizedRoomId);
+
+        // Notify others that this participant is back
+        io.to(normalizedRoomId).emit('participant-updated', participant);
+
+        // Send reconnecting user the current room state + videoState so they catch up instantly
+        socket.emit('room-joined', {
+          room: { ...room, participants: room.participants },
+          participant,
+          participants: room.participants,
+        });
+
+        // Also send the current video state explicitly so the viewer immediately syncs
+        socket.emit('video-state-updated', room.videoState);
+
+        console.log(`[GRACE] ${sanitizedName} reconnected successfully`);
+        return;
+      }
+
+      // --- NORMAL JOIN (new participant) ---
       if (room.participants.length >= 6) {
         return socket.emit('room-error', { message: 'Room is full (max 6 participants)' });
       }
 
       const participant: Participant = {
         id: socket.id,
+        userId,
         displayName: sanitizedName,
         isHost: false,
         isMuted: false,
         hasVideo: true,
+        disconnected: false,
         joinedAt: new Date(),
       };
 
       room.participants.push(participant);
       socketToRoom.set(socket.id, normalizedRoomId);
-      socketToParticipant.set(socket.id, participant);
+      socketToUserId.set(socket.id, userId);
+      userIdToData.set(userId, { roomId: normalizedRoomId, participant });
 
       socket.join(normalizedRoomId);
 
@@ -229,6 +381,7 @@ app.prepare().then(() => {
         participants: room.participants,
       });
 
+      // Broadcast new participant to existing members
       socket.to(normalizedRoomId).emit('participant-joined', participant);
 
       const systemMessage: ChatMessage = {
@@ -242,16 +395,69 @@ app.prepare().then(() => {
       io.to(normalizedRoomId).emit('chat-message-received', systemMessage);
     });
 
+    /* ------------------------------------------------------------------ */
+    /*  EXPLICIT LEAVE                                                     */
+    /* ------------------------------------------------------------------ */
     socket.on('leave-room', () => {
-      handleLeaveRoom(socket.id, io);
+      const userId = socketToUserId.get(socket.id);
+      const roomId = socketToRoom.get(socket.id);
+      if (userId && roomId) {
+        removeParticipantFromRoom(roomId, userId, io, true);
+      }
     });
 
+    /* ------------------------------------------------------------------ */
+    /*  DISCONNECT (grace period starts here)                              */
+    /* ------------------------------------------------------------------ */
+    socket.on('disconnect', () => {
+      const userId = socketToUserId.get(socket.id);
+      const roomId = socketToRoom.get(socket.id);
+
+      console.log(`Client disconnected: ${socket.id} (userId: ${userId || 'unknown'})`);
+
+      if (!userId || !roomId) return;
+
+      const record = userIdToData.get(userId);
+      if (!record) return;
+
+      const room = rooms.get(roomId);
+      if (!room) return;
+
+      // Mark participant as disconnected and notify room
+      record.participant.disconnected = true;
+      io.to(roomId).emit('participant-updated', record.participant);
+
+      // Start the 2-minute grace period
+      record.graceTimer = setTimeout(() => {
+        console.log(`[GRACE] Timer expired for ${record.participant.displayName} (${userId}) — removing from room ${roomId}`);
+
+        // Check if the user is still disconnected (they might have reconnected and timer was cleared)
+        const currentRecord = userIdToData.get(userId);
+        if (!currentRecord || currentRecord.graceTimer === undefined) {
+          // Timer was already cleared (reconnected) — do nothing
+          return;
+        }
+
+        removeParticipantFromRoom(roomId, userId, io, true);
+      }, RECONNECT_GRACE_MS);
+
+      // Clean up socket-level maps early (they'll be recreated on reconnect)
+      socketToRoom.delete(socket.id);
+      socketToUserId.delete(socket.id);
+      rateLimitMap.delete(socket.id);
+    });
+
+    /* ------------------------------------------------------------------ */
+    /*  VIDEO STATE CHANGE (host only)                                     */
+    /* ------------------------------------------------------------------ */
     socket.on('video-state-change', (state: Partial<VideoState>) => {
       console.log(`[SERVER] video-state-change from ${socket.id}:`, JSON.stringify({ videoSrc: state.videoSrc?.substring(0, 80), isPlaying: state.isPlaying }));
       if (isRateLimited(socket.id)) return;
+
       const roomId = socketToRoom.get(socket.id);
-      const participant = socketToParticipant.get(socket.id);
-      if (!roomId || !participant?.isHost) return;
+      const userId = socketToUserId.get(socket.id);
+      const record = userId ? userIdToData.get(userId) : undefined;
+      if (!roomId || !record?.participant?.isHost) return;
 
       const room = rooms.get(roomId);
       if (!room) return;
@@ -267,11 +473,15 @@ app.prepare().then(() => {
       io.to(roomId).emit('video-state-updated', room.videoState);
     });
 
+    /* ------------------------------------------------------------------ */
+    /*  CHAT MESSAGE                                                       */
+    /* ------------------------------------------------------------------ */
     socket.on('chat-message', (content: string) => {
       if (isRateLimited(socket.id)) return;
       const roomId = socketToRoom.get(socket.id);
-      const participant = socketToParticipant.get(socket.id);
-      if (!roomId || !participant) return;
+      const userId = socketToUserId.get(socket.id);
+      const record = userId ? userIdToData.get(userId) : undefined;
+      if (!roomId || !record) return;
 
       if (!content || typeof content !== 'string') return;
       const sanitized = sanitizeInput(content, MAX_MESSAGE_LENGTH);
@@ -280,7 +490,7 @@ app.prepare().then(() => {
       const message: ChatMessage = {
         id: uuidv4(),
         senderId: socket.id,
-        senderName: participant.displayName,
+        senderName: record.participant.displayName,
         content: sanitized,
         timestamp: new Date(),
         type: 'message',
@@ -289,38 +499,49 @@ app.prepare().then(() => {
       io.to(roomId).emit('chat-message-received', message);
     });
 
+    /* ------------------------------------------------------------------ */
+    /*  MUTE STATUS                                                        */
+    /* ------------------------------------------------------------------ */
     socket.on('mute-status', (isMuted: boolean) => {
       if (isRateLimited(socket.id)) return;
       if (typeof isMuted !== 'boolean') return;
       const roomId = socketToRoom.get(socket.id);
-      const participant = socketToParticipant.get(socket.id);
-      if (!roomId || !participant) return;
+      const userId = socketToUserId.get(socket.id);
+      const record = userId ? userIdToData.get(userId) : undefined;
+      if (!roomId || !record) return;
 
-      participant.isMuted = isMuted;
+      record.participant.isMuted = isMuted;
       const room = rooms.get(roomId);
       if (room) {
-        const p = room.participants.find((pp) => pp.id === socket.id);
+        const p = room.participants.find((pp) => pp.userId === userId);
         if (p) p.isMuted = isMuted;
       }
-      io.to(roomId).emit('participant-updated', participant);
+      io.to(roomId).emit('participant-updated', record.participant);
     });
 
+    /* ------------------------------------------------------------------ */
+    /*  VIDEO STATUS                                                       */
+    /* ------------------------------------------------------------------ */
     socket.on('video-status', (hasVideo: boolean) => {
       if (isRateLimited(socket.id)) return;
       if (typeof hasVideo !== 'boolean') return;
       const roomId = socketToRoom.get(socket.id);
-      const participant = socketToParticipant.get(socket.id);
-      if (!roomId || !participant) return;
+      const userId = socketToUserId.get(socket.id);
+      const record = userId ? userIdToData.get(userId) : undefined;
+      if (!roomId || !record) return;
 
-      participant.hasVideo = hasVideo;
+      record.participant.hasVideo = hasVideo;
       const room = rooms.get(roomId);
       if (room) {
-        const p = room.participants.find((pp) => pp.id === socket.id);
+        const p = room.participants.find((pp) => pp.userId === userId);
         if (p) p.hasVideo = hasVideo;
       }
-      io.to(roomId).emit('participant-updated', participant);
+      io.to(roomId).emit('participant-updated', record.participant);
     });
 
+    /* ------------------------------------------------------------------ */
+    /*  WEBRTC SIGNALING (unchanged)                                       */
+    /* ------------------------------------------------------------------ */
     socket.on('offer', ({ peerId, offer }) => {
       if (!peerId || !offer) return;
       socket.to(peerId).emit('offer-received', { peerId: socket.id, offer });
@@ -339,10 +560,6 @@ app.prepare().then(() => {
     socket.on('peer-ready', (peerId: string) => {
       if (!peerId || typeof peerId !== 'string') return;
       socket.to(peerId).emit('peer-ready-received', socket.id);
-    });
-
-    socket.on('disconnect', () => {
-      handleLeaveRoom(socket.id, io);
     });
   });
 
