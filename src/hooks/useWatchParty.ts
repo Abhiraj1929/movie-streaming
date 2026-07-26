@@ -150,8 +150,6 @@ export function useWatchParty({
 
     async function onOffer({ peerId, offer }: { peerId: string; offer: RTCSessionDescriptionInit }) {
       if (!socket || peerId === socket.id) return;
-      if (pendingOps.current.get(peerId)) return;
-      pendingOps.current.set(peerId, true);
       try {
         const pc = getOrCreatePC(peerId);
         await pc.setRemoteDescription(new RTCSessionDescription(offer));
@@ -160,14 +158,10 @@ export function useWatchParty({
         sendAnswer(peerId, answer);
       } catch (err) {
         console.error('[WebRTC] onOffer error:', err);
-      } finally {
-        pendingOps.current.delete(peerId);
       }
     }
 
     async function onAnswer({ peerId, answer }: { peerId: string; answer: RTCSessionDescriptionInit }) {
-      if (pendingOps.current.get(peerId)) return;
-      pendingOps.current.set(peerId, true);
       try {
         const pc = pcs.current.get(peerId);
         if (pc && pc.signalingState === 'have-local-offer') {
@@ -175,8 +169,6 @@ export function useWatchParty({
         }
       } catch (err) {
         console.error('[WebRTC] onAnswer error:', err);
-      } finally {
-        pendingOps.current.delete(peerId);
       }
     }
 
@@ -221,7 +213,7 @@ export function useWatchParty({
     if (!socket || !participant) return;
 
     participants.forEach((p) => {
-      if (p.id !== participant.id && !pcs.current.has(p.id)) {
+      if (p.id !== participant.id && !pcs.current.has(p.id) && participant.userId < p.userId) {
         sendPeerReady(p.id);
       }
     });

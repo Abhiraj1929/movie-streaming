@@ -142,7 +142,12 @@ let io: SocketIOServer | undefined;
 
 setInterval(cleanupRooms, 60_000);
 
-const server = createServer();
+const server = createServer((req, res) => {
+  if (req.url && !req.url.startsWith('/socket.io/')) {
+    res.writeHead(200, { 'Content-Type': 'text/plain' });
+    res.end('Socket.io server is running');
+  }
+});
 
 io = new SocketIOServer(server, {
   cors: { origin: corsOrigin, credentials: true },
@@ -401,5 +406,7 @@ io.on('connection', (socket) => {
 });
 
 server.listen(port, hostname, () => {
-  console.log(`Socket.io signaling server running on http://${hostname}:${port}`);
+  console.log(`[Socket.io] Server running on http://${hostname}:${port}`);
+  console.log(`[Socket.io] CORS origins: ${process.env.ALLOWED_ORIGINS || '*'}`);
+  console.log(`[Socket.io] Supabase: ${supabase ? 'connected' : 'disabled (no keys)'}`);
 });

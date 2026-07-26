@@ -126,7 +126,8 @@ export function useSocket() {
 
       socket.on('connect_error', (err: any) => {
         console.error('[SOCKET] Connection error:', err.message);
-        _setError(`Connection failed: ${err.message}`);
+        const url = process.env.NEXT_PUBLIC_SOCKET_URL || window.location.origin;
+        _setError(`Can't reach server at ${url}. Check that Railway is running and NEXT_PUBLIC_SOCKET_URL is set correctly on Vercel.`);
       });
 
       socket.on('room-created', (data: any) => {
