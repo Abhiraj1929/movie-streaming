@@ -104,6 +104,7 @@ export function useSocket() {
       if (importCancelled) return;
 
       const url = process.env.NEXT_PUBLIC_SOCKET_URL || window.location.origin;
+      console.log('[SOCKET] Connecting to:', url);
       socket = io(url, { transports: ['polling', 'websocket'], upgrade: true });
 
       socket.on('connect', () => {
@@ -122,6 +123,11 @@ export function useSocket() {
       });
 
       socket.on('disconnect', () => _setIsConnected(false));
+
+      socket.on('connect_error', (err: any) => {
+        console.error('[SOCKET] Connection error:', err.message);
+        _setError(`Connection failed: ${err.message}`);
+      });
 
       socket.on('room-created', (data: any) => {
         console.log('[SOCKET] room-created:', data.room.id);
