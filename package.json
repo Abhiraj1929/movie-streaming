@@ -4,9 +4,9 @@
   "private": true,
   "scripts": {
     "dev": "ts-node --project tsconfig.server.json server.ts",
-    "build": "next build && npm run build:server",
+    "build": "next build",
     "build:server": "tsc --project tsconfig.server.json",
-    "start": "NODE_ENV=production node dist/server.js",
+    "start": "NODE_ENV=production node dist/socket-server.js",
     "start:ts": "NODE_ENV=production ts-node --project tsconfig.server.json server.ts",
     "lint": "next lint"
   },
