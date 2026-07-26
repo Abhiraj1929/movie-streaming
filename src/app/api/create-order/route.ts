@@ -1,14 +1,16 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { supabaseAdmin } from '@/lib/supabase';
-import Razorpay from 'razorpay';
 
-const razorpay = new Razorpay({
-  key_id: process.env.RAZORPAY_KEY_ID!,
-  key_secret: process.env.RAZORPAY_KEY_SECRET!,
-});
+export const runtime = 'nodejs';
 
 export async function POST(req: NextRequest) {
   try {
+    const { default: Razorpay } = await import('razorpay');
+    const razorpay = new Razorpay({
+      key_id: process.env.RAZORPAY_KEY_ID || '',
+      key_secret: process.env.RAZORPAY_KEY_SECRET || '',
+    });
+
     const authHeader = req.headers.get('authorization');
     if (!authHeader) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
