@@ -7,11 +7,6 @@ const hostname = process.env.HOSTNAME || '0.0.0.0';
 const port = parseInt(process.env.PORT || '3000', 10);
 const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || '*').split(',');
 
-// Build CORS origin function that handles wildcard properly
-const corsOrigin = ALLOWED_ORIGINS.includes('*')
-  ? true  // true = reflect request origin
-  : ALLOWED_ORIGINS;
-
 const rooms = new Map<string, Room>();
 const socketToRoom = new Map<string, string>();
 const socketToUserId = new Map<string, string>();
@@ -128,18 +123,10 @@ let io: SocketIOServer | undefined;
 
 setInterval(cleanupRooms, 60_000);
 
-const server = createServer((req, res) => {
-  if (req.url === '/health' || req.url === '/') {
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ status: 'ok', rooms: rooms.size }));
-    return;
-  }
-  res.writeHead(404);
-  res.end();
-});
+const server = createServer();
 
 io = new SocketIOServer(server, {
-  cors: { origin: corsOrigin },
+  cors: { origin: ALLOWED_ORIGINS, methods: ['GET', 'POST'], credentials: true },
   transports: ['polling', 'websocket'],
   allowUpgrades: true,
   perMessageDeflate: false,
