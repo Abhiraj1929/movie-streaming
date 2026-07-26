@@ -7,6 +7,10 @@ const hostname = process.env.HOSTNAME || '0.0.0.0';
 const port = parseInt(process.env.PORT || '3000', 10);
 const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || '*').split(',');
 
+// Socket.io polling transport sends withCredentials: true by default,
+// so we must reflect the origin (cannot use *) and set credentials: true
+const corsOrigin = ALLOWED_ORIGINS.includes('*') ? true : ALLOWED_ORIGINS;
+
 const rooms = new Map<string, Room>();
 const socketToRoom = new Map<string, string>();
 const socketToUserId = new Map<string, string>();
@@ -126,7 +130,7 @@ setInterval(cleanupRooms, 60_000);
 const server = createServer();
 
 io = new SocketIOServer(server, {
-  cors: { origin: ALLOWED_ORIGINS, methods: ['GET', 'POST'] },
+  cors: { origin: corsOrigin, credentials: true },
   transports: ['polling', 'websocket'],
   allowUpgrades: true,
   perMessageDeflate: false,
