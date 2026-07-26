@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { supabaseAdmin } from '@/lib/supabase';
+import { getSupabaseAdmin } from '@/lib/supabase';
 import crypto from 'crypto';
 
 export const runtime = 'nodejs';
@@ -10,7 +10,7 @@ export async function POST(req: NextRequest) {
     if (!authHeader) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
     const token = authHeader.replace('Bearer ', '');
-    const { data: { user }, error: authError } = await supabaseAdmin.auth.getUser(token);
+    const { data: { user }, error: authError } = await getSupabaseAdmin().auth.getUser(token);
     if (authError || !user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
     const { razorpay_order_id, razorpay_payment_id, razorpay_signature } = await req.json();
@@ -25,7 +25,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'Invalid signature' }, { status: 400 });
     }
 
-    const { data: purchase, error: fetchError } = await supabaseAdmin
+    const { data: purchase, error: fetchError } = await getSupabaseAdmin()
       .from('room_purchases')
       .select('id, duration_hours')
       .eq('razorpay_order_id', razorpay_order_id)
@@ -38,7 +38,7 @@ export async function POST(req: NextRequest) {
 
     const expiresAt = new Date(Date.now() + purchase.duration_hours * 60 * 60 * 1000).toISOString();
 
-    const { error: updateError } = await supabaseAdmin
+    const { error: updateError } = await getSupabaseAdmin()
       .from('room_purchases')
       .update({
         payment_status: 'completed',

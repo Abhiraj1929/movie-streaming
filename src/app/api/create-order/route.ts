@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { supabaseAdmin } from '@/lib/supabase';
+import { getSupabaseAdmin } from '@/lib/supabase';
 
 export const runtime = 'nodejs';
 
@@ -15,7 +15,7 @@ export async function POST(req: NextRequest) {
     if (!authHeader) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
     const token = authHeader.replace('Bearer ', '');
-    const { data: { user }, error: authError } = await supabaseAdmin.auth.getUser(token);
+    const { data: { user }, error: authError } = await getSupabaseAdmin().auth.getUser(token);
     if (authError || !user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
     const { roomName, durationHours } = await req.json();
@@ -39,7 +39,7 @@ export async function POST(req: NextRequest) {
       receipt: `room_${sanitizedName}_${Date.now()}`,
     });
 
-    const { error: insertError } = await supabaseAdmin.from('room_purchases').insert({
+    const { error: insertError } = await getSupabaseAdmin().from('room_purchases').insert({
       user_id: user.id,
       room_name: sanitizedName,
       duration_hours: durationHours,
