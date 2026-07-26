@@ -70,7 +70,7 @@ export function VideoPlayer({
 
     const throttledTimeUpdate = () => {
       const now = Date.now();
-      if (now - lastSyncRef.current > 2000) {
+      if (now - lastSyncRef.current > 1000) {
         lastSyncRef.current = now;
         emit({ currentTime: video.currentTime });
       }
@@ -134,7 +134,7 @@ export function VideoPlayer({
     }
 
     const diff = Math.abs(video.currentTime - videoState.currentTime);
-    if (diff > 2) {
+    if (diff > 1) {
       video.currentTime = videoState.currentTime;
       setCurrentTime(videoState.currentTime);
     }

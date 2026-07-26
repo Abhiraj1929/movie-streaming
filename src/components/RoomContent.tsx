@@ -9,8 +9,9 @@ import { VideoSourceSelector } from '@/components/theater/VideoSourceSelector';
 import { MicControl } from '@/components/theater/MicControl';
 import { ChatSidebar } from '@/components/chat/ChatSidebar';
 import { ParticipantList } from '@/components/chat/ParticipantList';
+import PeerAudio from '@/components/theater/PeerAudio';
 import { VideoState } from '@/types';
-import { MessageSquare, Users, ArrowLeft, Film, X } from 'lucide-react';
+import { MessageSquare, Users, ArrowLeft, Film, X, Clock, AlertTriangle } from 'lucide-react';
 
 export default function RoomContent() {
   const router = useRouter();
@@ -59,7 +60,37 @@ export default function RoomContent() {
   const [showChat, setShowChat] = useState(false);
   const [showParticipants, setShowParticipants] = useState(false);
   const [showSourceSelector, setShowSourceSelector] = useState(false);
+  const [timeRemaining, setTimeRemaining] = useState<number | null>(null);
+  const [showExpiredModal, setShowExpiredModal] = useState(false);
   const videoContainerRef = useRef<HTMLDivElement>(null);
+  const timerRef = useRef<NodeJS.Timeout | null>(null);
+
+  useEffect(() => {
+    if (room?.expiresAt) {
+      const tick = () => {
+        const remaining = room.expiresAt! - Date.now();
+        if (remaining <= 0) {
+          setTimeRemaining(0);
+          if (timerRef.current) clearInterval(timerRef.current);
+        } else {
+          setTimeRemaining(remaining);
+        }
+      };
+      tick();
+      timerRef.current = setInterval(tick, 1000);
+      return () => { if (timerRef.current) clearInterval(timerRef.current); };
+    }
+  }, [room?.expiresAt]);
+
+  useEffect(() => {
+    if (!socket) return;
+    const handler = () => {
+      if (timerRef.current) clearInterval(timerRef.current);
+      setShowExpiredModal(true);
+    };
+    socket.on('room-expired', handler);
+    return () => socket.off('room-expired', handler);
+  }, [socket]);
 
   useEffect(() => {
     if (!isConnected) return;
@@ -127,7 +158,17 @@ export default function RoomContent() {
             </button>
             <div>
               <h1 className="text-sm sm:text-lg font-semibold text-white">Watch Party</h1>
-              <p className="text-[10px] sm:text-xs text-gray-500">Room: {room.id}</p>
+              <div className="flex items-center gap-2">
+                <p className="text-[10px] sm:text-xs text-gray-500">Room: {room.id}</p>
+                {timeRemaining !== null && (
+                  <span className={`flex items-center gap-1 text-[10px] sm:text-xs font-medium ${
+                    timeRemaining < 300000 ? 'text-red-400' : 'text-gray-400'
+                  }`}>
+                    <Clock className="w-3 h-3" />
+                    {timeRemaining <= 0 ? 'Expired' : `${Math.floor(timeRemaining / 60000)}m ${Math.floor((timeRemaining % 60000) / 1000)}s`}
+                  </span>
+                )}
+              </div>
             </div>
           </div>
 
@@ -236,13 +277,24 @@ export default function RoomContent() {
       />
 
       {peerStreams.map((ps) => (
-        <audio
-          key={ps.peerId}
-          ref={(el) => { if (el) el.srcObject = ps.stream; }}
-          autoPlay
-          playsInline
-        />
+        <PeerAudio key={ps.peerId} peerId={ps.peerId} stream={ps.stream} />
       ))}
+
+      {showExpiredModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+          <div className="bg-cinema-900 rounded-2xl p-6 sm:p-8 border border-cinema-800 w-full max-w-md mx-4 text-center">
+            <AlertTriangle className="w-12 h-12 text-red-500 mx-auto mb-4" />
+            <h2 className="text-xl font-bold text-white mb-2">Room Expired</h2>
+            <p className="text-gray-400 mb-6">This room's paid time has expired. Create a new room to continue watching.</p>
+            <button
+              onClick={() => router.push('/')}
+              className="w-full py-3 bg-gradient-to-r from-neon-blue to-neon-purple text-white font-semibold rounded-lg hover:opacity-90 transition-all"
+            >
+              Go Home
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

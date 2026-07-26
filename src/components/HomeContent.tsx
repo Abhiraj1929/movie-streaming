@@ -4,12 +4,20 @@ import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import { CreateRoom } from '@/components/lobby/CreateRoom';
 import { JoinRoom } from '@/components/lobby/JoinRoom';
+import AuthModal from '@/components/AuthModal';
 import { useSocket } from '@/hooks/useSocket';
-import { Film, Tv, Sparkles, Users, Shield, Zap } from 'lucide-react';
+import { supabase } from '@/lib/supabase-client';
+import { Film, Tv, Users, Shield, Zap, LogOut, LogIn, Clock, IndianRupee } from 'lucide-react';
 
 export default function HomeContent() {
   const router = useRouter();
   const [activeTab, setActiveTab] = useState<'create' | 'join'>('create');
+  const [showAuth, setShowAuth] = useState(false);
+  const [user, setUser] = useState<any>(null);
+  const [sessionToken, setSessionToken] = useState('');
+  const [durationHours, setDurationHours] = useState(1);
+  const [paying, setPaying] = useState(false);
+
   const {
     isConnected,
     room,
@@ -26,16 +34,116 @@ export default function HomeContent() {
     }
   }, [room, participant, router]);
 
-  const handleCreateRoom = (displayName: string) => {
-    createRoom(displayName);
+  // Restore session after Google OAuth redirect
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data: { session } }: { data: { session: any } }) => {
+      if (session?.user) {
+        setUser(session.user);
+        setSessionToken(session.access_token);
+        handleOAuthPending(session);
+      }
+    });
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event: string, session: any) => {
+      if (session?.user) {
+        setUser(session.user);
+        setSessionToken(session.access_token);
+        handleOAuthPending(session);
+      } else {
+        setUser(null);
+        setSessionToken('');
+      }
+    });
+    return () => subscription.unsubscribe();
+  }, []);
+
+  function handleOAuthPending(session: any) {
+    const pending = sessionStorage.getItem('wp_oauth_pending');
+    if (pending && session?.user) {
+      sessionStorage.removeItem('wp_oauth_pending');
+      const savedName = sessionStorage.getItem('wp_pending_name');
+      const savedHours = parseInt(sessionStorage.getItem('wp_pending_hours') || '1', 10);
+      if (savedName) {
+        sessionStorage.removeItem('wp_pending_name');
+        sessionStorage.removeItem('wp_pending_hours');
+        setDurationHours(savedHours);
+        doCreateRoom(savedName);
+      }
+    }
+  }
+
+  const doCreateRoom = async (displayName: string) => {
+    setPaying(true);
+    try {
+      const res = await fetch('/api/create-order', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${sessionToken}` },
+        body: JSON.stringify({ roomName: `${Date.now()}`, durationHours }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error);
+
+      const razorpay = (window as any).Razorpay;
+      if (!razorpay) { alert('Razorpay SDK not loaded. Refresh the page and try again.'); setPaying(false); return; }
+
+      const rzp = new razorpay({
+        key: data.key,
+        amount: data.amount,
+        currency: data.currency,
+        name: 'Watch Party',
+        description: `${durationHours} hour${durationHours > 1 ? 's' : ''} room`,
+        order_id: data.orderId,
+        handler: async (response: any) => {
+          const verifyRes = await fetch('/api/verify-payment', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${sessionToken}` },
+            body: JSON.stringify(response),
+          });
+          const verifyData = await verifyRes.json();
+          if (!verifyRes.ok) throw new Error(verifyData.error);
+
+          createRoom(displayName, verifyData.purchaseId);
+        },
+        modal: { ondismiss: () => setPaying(false) },
+        prefill: { email: user?.email, contact: user?.phone },
+        theme: { color: '#3b82f6' },
+      });
+      rzp.open();
+    } catch (err: any) {
+      setPaying(false);
+      alert(err.message);
+    }
+  };
+
+  const handleCreateRoom = async (displayName: string) => {
+    if (!user) {
+      sessionStorage.setItem('wp_pending_name', displayName);
+      sessionStorage.setItem('wp_pending_hours', String(durationHours));
+      setShowAuth(true);
+      return;
+    }
+    await doCreateRoom(displayName);
   };
 
   const handleJoinRoom = (roomId: string, displayName: string) => {
     joinRoom(roomId, displayName);
   };
 
+  const handleSignOut = async () => {
+    await supabase.auth.signOut();
+    setUser(null);
+    setSessionToken('');
+  };
+
+  const handleCloseAuth = () => {
+    setShowAuth(false);
+    sessionStorage.removeItem('wp_pending_name');
+    sessionStorage.removeItem('wp_pending_hours');
+    sessionStorage.removeItem('wp_oauth_pending');
+  };
+
   return (
     <div className="min-h-screen flex flex-col">
+      <AuthModal isOpen={showAuth} onClose={handleCloseAuth} />
       <header className="border-b border-cinema-800 bg-cinema-950/80 backdrop-blur-sm sticky top-0 z-50">
         <div className="container mx-auto px-3 sm:px-4 py-3 sm:py-4 flex items-center justify-between">
           <div className="flex items-center gap-2 sm:gap-3">
@@ -48,6 +156,15 @@ export default function HomeContent() {
             </div>
           </div>
           <div className="flex items-center gap-2">
+            {user ? (
+              <button onClick={handleSignOut} className="flex items-center gap-1 text-xs sm:text-sm text-gray-400 hover:text-white transition-colors">
+                <LogOut className="w-3 h-3 sm:w-4 sm:h-4" /> Sign Out
+              </button>
+            ) : (
+              <button onClick={() => setShowAuth(true)} className="flex items-center gap-1 text-xs sm:text-sm text-neon-blue hover:underline">
+                <LogIn className="w-3 h-3 sm:w-4 sm:h-4" /> Sign In
+              </button>
+            )}
             <div className={`w-2 h-2 rounded-full ${isConnected ? 'bg-green-500' : 'bg-red-500'}`} />
             <span className="text-xs sm:text-sm text-gray-400">
               {isConnected ? 'Connected' : 'Connecting...'}
@@ -99,7 +216,36 @@ export default function HomeContent() {
               )}
 
               {activeTab === 'create' ? (
-                <CreateRoom onCreateRoom={handleCreateRoom} isConnected={isConnected} />
+                <div className="space-y-4">
+                  <div className="space-y-2">
+                    <label className="block text-sm font-medium text-gray-300">Room Duration</label>
+                    <div className="grid grid-cols-3 gap-2">
+                      {[1, 2, 3].map((h) => (
+                        <button
+                          key={h}
+                          onClick={() => setDurationHours(h)}
+                          disabled={paying}
+                          className={`flex flex-col items-center gap-1 py-3 px-2 rounded-lg border transition-all ${
+                            durationHours === h
+                              ? 'border-neon-blue bg-neon-blue/10 text-neon-blue'
+                              : 'border-cinema-600 bg-cinema-800 text-gray-400 hover:border-cinema-500'
+                          } disabled:opacity-50`}
+                        >
+                          <Clock className="w-4 h-4" />
+                          <span className="text-sm font-medium">{h} hr</span>
+                          <span className="text-xs flex items-center gap-0.5">
+                            <IndianRupee className="w-3 h-3" />{h * 5}
+                          </span>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                  <CreateRoom
+                    onCreateRoom={handleCreateRoom}
+                    isConnected={isConnected && !paying}
+                    actionLabel={paying ? 'Processing Payment...' : user ? `Create & Pay ₹${durationHours * 5}` : 'Sign in to Create'}
+                  />
+                </div>
               ) : (
                 <JoinRoom onJoinRoom={handleJoinRoom} isConnected={isConnected} />
               )}
@@ -127,17 +273,17 @@ export default function HomeContent() {
                     </div>
                   </li>
                   <li className="flex items-start gap-2 sm:gap-3">
-                    <Sparkles className="w-4 h-4 sm:w-5 sm:h-5 text-neon-pink mt-0.5 flex-shrink-0" />
+                    <IndianRupee className="w-4 h-4 sm:w-5 sm:h-5 text-green-500 mt-0.5 flex-shrink-0" />
                     <div>
-                      <p className="text-white font-medium text-sm">Real-time Sync</p>
-                      <p className="text-xs text-gray-500">Play, pause, and seek in perfect sync</p>
+                      <p className="text-white font-medium text-sm">₹5/hr Rooms</p>
+                      <p className="text-xs text-gray-500">Pay only for the time you use</p>
                     </div>
                   </li>
                   <li className="flex items-start gap-2 sm:gap-3">
                     <Shield className="w-4 h-4 sm:w-5 sm:h-5 text-yellow-500 mt-0.5 flex-shrink-0" />
                     <div>
                       <p className="text-white font-medium text-sm">Private Rooms</p>
-                      <p className="text-xs text-gray-500">Invite-only with 6-character room codes</p>
+                      <p className="text-xs text-gray-500">Invite-only with room codes</p>
                     </div>
                   </li>
                 </ul>
@@ -148,19 +294,19 @@ export default function HomeContent() {
                 <ol className="space-y-2 text-xs sm:text-sm text-gray-400">
                   <li className="flex gap-2 sm:gap-3">
                     <span className="w-5 h-5 sm:w-6 sm:h-6 rounded-full bg-neon-blue/20 text-neon-blue flex items-center justify-center text-[10px] sm:text-xs font-bold flex-shrink-0">1</span>
-                    <span>Create or join a watch party room</span>
+                    <span>Sign in and pay ₹5/hr for your room</span>
                   </li>
                   <li className="flex gap-2 sm:gap-3">
                     <span className="w-5 h-5 sm:w-6 sm:h-6 rounded-full bg-neon-blue/20 text-neon-blue flex items-center justify-center text-[10px] sm:text-xs font-bold flex-shrink-0">2</span>
-                    <span>Host selects a video file or URL</span>
+                    <span>Share the room code with friends</span>
                   </li>
                   <li className="flex gap-2 sm:gap-3">
                     <span className="w-5 h-5 sm:w-6 sm:h-6 rounded-full bg-neon-blue/20 text-neon-blue flex items-center justify-center text-[10px] sm:text-xs font-bold flex-shrink-0">3</span>
-                    <span>Everyone watches in perfect sync</span>
+                    <span>Host selects a video file or URL</span>
                   </li>
                   <li className="flex gap-2 sm:gap-3">
                     <span className="w-5 h-5 sm:w-6 sm:h-6 rounded-full bg-neon-blue/20 text-neon-blue flex items-center justify-center text-[10px] sm:text-xs font-bold flex-shrink-0">4</span>
-                    <span>Chat and voice call while watching</span>
+                    <span>Everyone watches in perfect sync</span>
                   </li>
                 </ol>
               </div>
@@ -171,7 +317,9 @@ export default function HomeContent() {
 
       <footer className="border-t border-cinema-800 py-3 sm:py-4">
         <div className="container mx-auto px-4 text-center text-xs sm:text-sm text-gray-500">
-          Built with Next.js, WebRTC, and Socket.io
+          Built with Love by <a href="https://www.aspine.in" target="_blank" rel="noopener noreferrer" className="text-neon-blue hover:underline">
+            Aspine.in
+          </a>
         </div>
       </footer>
     </div>

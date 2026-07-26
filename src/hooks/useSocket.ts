@@ -149,6 +149,16 @@ export function useSocket() {
 
       socket.on('room-error', (data: any) => _setError(data.message));
 
+      socket.on('room-expired', () => {
+        console.log('[SOCKET] room-expired');
+        _setError('This room\'s paid time has expired');
+        clearCachedRoomData();
+        _setRoom(null);
+        _setParticipant(null);
+        _setParticipants([]);
+        _setChatMessages([]);
+      });
+
       socket.on('participant-joined', (p: Participant) => {
         _setParticipants((prev: Participant[]) => {
           if (prev.find(pp => pp.userId === p.userId)) return prev;
@@ -186,9 +196,9 @@ export function useSocket() {
     return () => { importCancelled = true; };
   }, [userId]);
 
-  const createRoom = useCallback((displayName: string) => {
+  const createRoom = useCallback((displayName: string, purchaseId?: string) => {
     if (!socket?.connected) { _setError('Not connected yet, please wait...'); return; }
-    socket.emit('create-room', { userId, displayName });
+    socket.emit('create-room', { userId, displayName, purchaseId });
   }, [userId]);
 
   const joinRoom = useCallback((roomId: string, displayName: string) => {

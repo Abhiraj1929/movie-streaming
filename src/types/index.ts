@@ -16,6 +16,7 @@ export interface Room {
   videoState: VideoState;
   createdAt: Date;
   emptySince?: number;
+  expiresAt?: number;
 }
 
 export interface VideoState {

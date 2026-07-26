@@ -1,15 +1,26 @@
+import dotenv from 'dotenv';
+dotenv.config({ path: '.env.local' });
 import { createServer } from 'http';
 import { Server as SocketIOServer } from 'socket.io';
 import { v4 as uuidv4 } from 'uuid';
+import { createClient } from '@supabase/supabase-js';
 import { Room, Participant, VideoState, ChatMessage } from './server-types';
 
 const hostname = process.env.HOSTNAME || '0.0.0.0';
 const port = parseInt(process.env.PORT || '3000', 10);
 const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || '*').split(',');
 
-// Socket.io polling transport sends withCredentials: true by default,
-// so we must reflect the origin (cannot use *) and set credentials: true
 const corsOrigin = ALLOWED_ORIGINS.includes('*') ? true : ALLOWED_ORIGINS;
+
+// Supabase admin client for payment verification
+const supabaseUrl = process.env.SUPABASE_URL;
+const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+if (!supabaseUrl || !supabaseServiceKey) {
+  console.warn('[WARN] SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY must be set for payment verification');
+}
+const supabase = supabaseUrl && supabaseServiceKey
+  ? createClient(supabaseUrl, supabaseServiceKey)
+  : null;
 
 const rooms = new Map<string, Room>();
 const socketToRoom = new Map<string, string>();
@@ -108,7 +119,11 @@ function removeParticipantFromRoom(roomId: string, userId: string, io: SocketIOS
 function cleanupRooms() {
   const now = Date.now();
   for (const [roomId, room] of rooms) {
-    if (room.participants.length === 0) {
+    if (room.expiresAt && now > room.expiresAt) {
+      io?.to(roomId).emit('room-expired');
+      for (const p of room.participants) removeUserFromServer(p.userId, io);
+      rooms.delete(roomId);
+    } else if (room.participants.length === 0) {
       if (room.emptySince && now - room.emptySince > ROOM_EMPTY_TTL_MS) {
         for (const [uid, data] of userIdToData) {
           if (data.roomId === roomId) removeUserFromServer(uid);
@@ -150,12 +165,35 @@ io.use((socket, next) => {
 io.on('connection', (socket) => {
   console.log(`Client connected: ${socket.id}`);
 
-  socket.on('create-room', ({ roomId: customRoomId, userId, displayName }) => {
+  socket.on('create-room', async ({ roomId: customRoomId, userId, displayName, purchaseId }) => {
     if (isRateLimited(socket.id)) return;
     if (!userId || typeof userId !== 'string') return socket.emit('room-error', { message: 'User ID is required' });
     if (!displayName || typeof displayName !== 'string') return socket.emit('room-error', { message: 'Display name is required' });
     const sanitizedName = sanitizeInput(displayName, MAX_DISPLAY_NAME_LENGTH);
     if (!sanitizedName) return socket.emit('room-error', { message: 'Invalid display name' });
+
+    // Validate payment against Supabase
+    let expiresAt: number | undefined;
+    if (purchaseId && supabase) {
+      const { data: purchase, error: dbError } = await supabase
+        .from('room_purchases')
+        .select('payment_status, expires_at, room_name')
+        .eq('id', purchaseId)
+        .single();
+
+      if (dbError || !purchase) {
+        return socket.emit('room-error', { message: 'Purchase record not found' });
+      }
+      if (purchase.payment_status !== 'completed') {
+        return socket.emit('room-error', { message: 'Payment not completed' });
+      }
+      if (purchase.expires_at && new Date(purchase.expires_at).getTime() < Date.now()) {
+        return socket.emit('room-error', { message: 'Room has already expired' });
+      }
+      if (purchase.expires_at) {
+        expiresAt = new Date(purchase.expires_at).getTime();
+      }
+    }
 
     let roomId: string;
     if (customRoomId && typeof customRoomId === 'string') {
@@ -175,6 +213,7 @@ io.on('connection', (socket) => {
       id: roomId, hostId: socket.id, participants: [participant],
       videoState: { isPlaying: false, currentTime: 0, duration: 0, videoSrc: '', lastUpdate: Date.now() },
       createdAt: new Date(),
+      expiresAt,
     };
 
     rooms.set(roomId, room);

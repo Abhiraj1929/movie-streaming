@@ -7,6 +7,11 @@ const ICE_SERVERS: RTCConfiguration = {
   iceServers: [
     { urls: 'stun:stun.l.google.com:19302' },
     { urls: 'stun:stun1.l.google.com:19302' },
+    { urls: 'stun:stun2.l.google.com:19302' },
+    { urls: 'stun:stun3.l.google.com:19302' },
+    { urls: 'stun:stun4.l.google.com:19302' },
+    // For production across different networks, add a TURN server:
+    // { urls: 'turn:your-turn-server.com:3478', username: '...', credential: '...' }
   ],
 };
 

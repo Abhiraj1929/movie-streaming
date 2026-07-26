@@ -6,9 +6,10 @@ import { Sparkles } from 'lucide-react';
 interface CreateRoomProps {
   onCreateRoom: (displayName: string) => void;
   isConnected: boolean;
+  actionLabel?: string;
 }
 
-export function CreateRoom({ onCreateRoom, isConnected }: CreateRoomProps) {
+export function CreateRoom({ onCreateRoom, isConnected, actionLabel }: CreateRoomProps) {
   const [displayName, setDisplayName] = useState('');
   const [isLoading, setIsLoading] = useState(false);
 
@@ -17,7 +18,7 @@ export function CreateRoom({ onCreateRoom, isConnected }: CreateRoomProps) {
     if (displayName.trim() && isConnected) {
       setIsLoading(true);
       onCreateRoom(displayName.trim());
-      setTimeout(() => setIsLoading(false), 5000);
+      setTimeout(() => setIsLoading(false), 30000);
     }
   };
 
@@ -51,7 +52,7 @@ export function CreateRoom({ onCreateRoom, isConnected }: CreateRoomProps) {
           ) : (
             <>
               <Sparkles className="w-5 h-5" />
-              Create Watch Party
+              {actionLabel || 'Create Watch Party'}
             </>
           )}
         </button>
