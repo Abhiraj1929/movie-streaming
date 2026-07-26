@@ -126,7 +126,7 @@ setInterval(cleanupRooms, 60_000);
 const server = createServer();
 
 io = new SocketIOServer(server, {
-  cors: { origin: ALLOWED_ORIGINS, methods: ['GET', 'POST'], credentials: true },
+  cors: { origin: ALLOWED_ORIGINS, methods: ['GET', 'POST'] },
   transports: ['polling', 'websocket'],
   allowUpgrades: true,
   perMessageDeflate: false,
