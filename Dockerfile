@@ -1,11 +1,11 @@
-FROM node:20-slim AS builder
+FROM node:22-slim AS builder
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm install
 COPY . .
 RUN npm run build:server
 
-FROM node:20-slim
+FROM node:22-slim
 WORKDIR /app
 ENV NODE_ENV=production
 
